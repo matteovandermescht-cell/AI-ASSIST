@@ -4,65 +4,214 @@ import android.app.Service;
 import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.os.IBinder;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.WindowManager;
 import android.widget.*;
 import android.graphics.Color;
-import org.json.*;
-import java.net.*;
-import java.io.*;
-import java.nio.charset.StandardCharsets;
+import org.json.JSONObject;
+import java.io.File;
+import java.util.Locale;
 import java.util.concurrent.*;
 
 public class OverlayService extends Service {
- private WindowManager wm; private TextView bubble,result; private LinearLayout panel;
- private final ExecutorService worker=Executors.newSingleThreadExecutor(); private JSONObject pending;
- private int dp(int v){return (int)(v*getResources().getDisplayMetrics().density);}
- private WindowManager.LayoutParams lp(int w,int h){return new WindowManager.LayoutParams(w,h,WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT);}
- @Override public void onCreate(){super.onCreate();wm=(WindowManager)getSystemService(WINDOW_SERVICE);
- bubble=new TextView(this);bubble.setText("AI");bubble.setTextColor(-1);bubble.setTextSize(16);bubble.setGravity(Gravity.CENTER);bubble.setBackgroundColor(0xFF6750D8);bubble.setOnClickListener(v->toggle());
- WindowManager.LayoutParams p=lp(dp(58),dp(58));p.gravity=Gravity.TOP|Gravity.END;p.x=dp(14);p.y=dp(180);wm.addView(bubble,p);}
- private Button button(String text){Button b=new Button(this);b.setText(text);b.setAllCaps(false);return b;}
- private void toggle(){if(panel!=null){wm.removeView(panel);panel=null;return;}
- panel=new LinearLayout(this);panel.setOrientation(1);panel.setPadding(dp(12),dp(10),dp(12),dp(10));panel.setBackgroundColor(0xF01B1B29);
- TextView head=new TextView(this);head.setText("AI ASSISTENT · Overlay");head.setTextColor(-1);head.setTextSize(16);panel.addView(head);
- EditText task=new EditText(this);task.setTextColor(-1);task.setHintTextColor(0xFFAAAAAA);task.setHint("Was soll ich auf dem Bildschirm tun?");panel.addView(task,new LinearLayout.LayoutParams(-1,dp(58)));
- result=new TextView(this);result.setTextColor(0xFFE0DDF5);result.setTextSize(12);result.setText("Bereit. Die KI liest sichtbare UI-Texte.");panel.addView(result);
- Button ask=button("KI analysieren");panel.addView(ask);ask.setOnClickListener(v->ask(task.getText().toString()));
- Button run=button("Vorgeschlagene Aktion ausführen");panel.addView(run);run.setOnClickListener(v->execute());
- Button close=button("Overlay schließen");panel.addView(close);close.setOnClickListener(v->stopSelf());
- WindowManager.LayoutParams p=lp(dp(315),-2);p.gravity=Gravity.TOP|Gravity.END;p.x=dp(10);p.y=dp(248);p.flags=WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;wm.addView(panel,p);}
- private void ask(String task){if(task.trim().isEmpty()){result.setText("Bitte Aufgabe eingeben.");return;}
- ScreenActionService s=ScreenActionService.instance;if(s==null){result.setText("Bitte zuerst die Bedienungshilfe aktivieren.");return;}
- String key=getSharedPreferences("ai",MODE_PRIVATE).getString("gemini_key","");if(key.isEmpty()){result.setText("API-Schlüssel fehlt. Öffne die App und speichere deinen Gemini-Schlüssel.");return;}
- String screen=s.readVisibleText();result.setText("KI analysiert sichtbare UI-Texte …");
- worker.execute(()->{try{
- JSONObject part=new JSONObject().put("text","Du bist ein Android UI-Assistent. Nutzeraufgabe: "+task+"\nSichtbare UI-Texte: "+screen+"\nAntworte ausschließlich als JSON mit explanation und action. action ist null oder ein Objekt: {type:tap,x:number,y:number}, {type:swipe,x1:number,y1:number,x2:number,y2:number,duration:number}, {type:type,text:string}. Erfinde keine Koordinaten. Wenn die Informationen nicht reichen, setze action auf null.");
- JSONObject body=new JSONObject().put("contents",new JSONArray().put(new JSONObject().put("parts",new JSONArray().put(part)))).put("generationConfig",new JSONObject().put("responseMimeType","application/json"));
- URL url=new URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key="+URLEncoder.encode(key,"UTF-8"));
- HttpURLConnection c=(HttpURLConnection)url.openConnection();c.setRequestMethod("POST");c.setConnectTimeout(15000);c.setReadTimeout(30000);c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json");
- try(OutputStream os=c.getOutputStream()){os.write(body.toString().getBytes(StandardCharsets.UTF_8));}
- InputStream in=c.getResponseCode()<400?c.getInputStream():c.getErrorStream();ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] buf=new byte[4096];int n;while((n=in.read(buf))!=-1)out.write(buf,0,n);
- JSONObject response=new JSONObject(out.toString("UTF-8"));String raw=response.getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text");
- JSONObject parsed=new JSONObject(raw);pending=parsed.optJSONObject("action");String explanation=parsed.optString("explanation","Keine Erklärung erhalten.");
- post(()->result.setText(explanation+(pending==null?"\nKeine ausführbare Aktion vorgeschlagen.":"\nAktion bereit – bitte prüfen und bestätigen.")));c.disconnect();
- }catch(Exception e){post(()->result.setText("KI-Fehler: "+e.getMessage()));}});}
- private void execute(){
-  if(pending==null){result.setText("Keine bestätigbare Aktion vorhanden.");return;}
-  final JSONObject action=pending;pending=null;
-  if(panel!=null){wm.removeView(panel);panel=null;}
-  new android.os.Handler(getMainLooper()).postDelayed(()->{
-   ScreenActionService s=ScreenActionService.instance;
-   if(s==null){Toast.makeText(this,"Bedienungshilfe ist nicht aktiv.",Toast.LENGTH_LONG).show();return;}
-   try{String t=action.getString("type");boolean ok=false;
-    if("tap".equals(t))ok=s.tap((float)action.getDouble("x"),(float)action.getDouble("y"));
-    else if("swipe".equals(t))ok=s.swipe((float)action.getDouble("x1"),(float)action.getDouble("y1"),(float)action.getDouble("x2"),(float)action.getDouble("y2"),action.optLong("duration",350));
-    else if("type".equals(t))ok=s.setFocusedText(action.getString("text"));
-    Toast.makeText(this,ok?"Aktion an Android übergeben.":"Aktion konnte nicht ausgeführt werden.",Toast.LENGTH_LONG).show();
-   }catch(Exception e){Toast.makeText(this,"Ungültige Aktion: "+e.getMessage(),Toast.LENGTH_LONG).show();}
-  },350);
- }
- private void post(Runnable r){new android.os.Handler(getMainLooper()).post(r);}
- @Override public void onDestroy(){if(bubble!=null)wm.removeView(bubble);if(panel!=null)wm.removeView(panel);worker.shutdownNow();super.onDestroy();}
- @Override public IBinder onBind(Intent i){return null;}
+    private WindowManager wm;
+    private TextView bubble, status;
+    private LinearLayout panel;
+    private EditText taskInput;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private volatile boolean running = false;
+    private volatile boolean stopRequested = false;
+    private LocalVisionAgent agent;
+
+    private int dp(int v) { return (int)(v * getResources().getDisplayMetrics().density); }
+    private WindowManager.LayoutParams params(int w, int h) {
+        return new WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
+    }
+
+    @Override public void onCreate() {
+        super.onCreate();
+        if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
+        wm = (WindowManager)getSystemService(WINDOW_SERVICE);
+        bubble = new TextView(this);
+        bubble.setText("AI");
+        bubble.setTextColor(Color.WHITE);
+        bubble.setTextSize(16);
+        bubble.setGravity(Gravity.CENTER);
+        bubble.setBackgroundColor(0xFF6750D8);
+        bubble.setOnClickListener(v -> togglePanel());
+        WindowManager.LayoutParams p = params(dp(58), dp(58));
+        p.gravity = Gravity.TOP | Gravity.END;
+        p.x = dp(14); p.y = dp(180);
+        wm.addView(bubble, p);
+    }
+
+    private Button makeButton(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        return b;
+    }
+
+    private void togglePanel() {
+        if (panel != null) { wm.removeView(panel); panel = null; return; }
+        panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(12), dp(10), dp(12), dp(10));
+        panel.setBackgroundColor(0xF01B1B29);
+
+        TextView heading = new TextView(this);
+        heading.setText("AI ASSISTENT · LOCAL AGENT");
+        heading.setTextColor(Color.WHITE);
+        heading.setTextSize(15);
+        panel.addView(heading);
+
+        taskInput = new EditText(this);
+        taskInput.setTextColor(Color.WHITE);
+        taskInput.setHintTextColor(0xFFAAAAAA);
+        taskInput.setHint("Beschreibe dein Ziel …");
+        panel.addView(taskInput, new LinearLayout.LayoutParams(-1, dp(58)));
+
+        status = new TextView(this);
+        status.setTextColor(0xFFE0DDF5);
+        status.setTextSize(12);
+        status.setText("Offline-Modus. Bis zu 6 kontrollierte Schritte pro Auftrag.");
+        panel.addView(status);
+
+        Button start = makeButton("Agent starten");
+        panel.addView(start);
+        start.setOnClickListener(v -> startAgent(taskInput.getText().toString()));
+
+        Button stop = makeButton("STOP · Agent sofort anhalten");
+        stop.setTextColor(0xFFFF7777);
+        panel.addView(stop);
+        stop.setOnClickListener(v -> requestStop());
+
+        Button close = makeButton("Overlay schließen");
+        panel.addView(close);
+        close.setOnClickListener(v -> stopSelf());
+
+        WindowManager.LayoutParams p = params(dp(320), -2);
+        p.gravity = Gravity.TOP | Gravity.END;
+        p.x = dp(10); p.y = dp(248);
+        p.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
+        wm.addView(panel, p);
+    }
+
+    private void startAgent(String task) {
+        if (running) { updateStatus("Der Agent läuft bereits."); return; }
+        if (task == null || task.trim().isEmpty()) { updateStatus("Bitte zuerst ein Ziel eingeben."); return; }
+        if (ScreenCaptureService.awaitFrame(150) == null) {
+            updateStatus("Keine Bildschirmfreigabe aktiv. Starte sie zuerst in der Haupt-App.");
+            return;
+        }
+        File model = new File(getFilesDir(), "model.litertlm");
+        if (!model.exists()) { updateStatus("Lokales Modell fehlt. Wähle zuerst eine .litertlm-Datei aus."); return; }
+        running = true;
+        stopRequested = false;
+        worker.execute(() -> runAgent(task.trim(), model.getAbsolutePath()));
+    }
+
+    private void runAgent(String task, String modelPath) {
+        int completed = 0;
+        try {
+            updateStatus("Lade lokales KI-Modell …");
+            agent = new LocalVisionAgent(modelPath);
+            for (int step = 1; step <= 6 && !stopRequested; step++) {
+                String frame = ScreenCaptureService.awaitFrame(6000);
+                if (frame == null) { updateStatus("Kein aktuelles Bildschirmbild erhalten. Agent pausiert."); break; }
+                ScreenActionService service = ScreenActionService.instance;
+                if (service == null) { updateStatus("Bedienungshilfe nicht aktiv. Agent gestoppt."); break; }
+                String visibleText = service.readVisibleText();
+                if (isSensitiveContext(visibleText)) {
+                    updateStatus("Sicherheitsstopp: sensibler Bildschirm erkannt. Bitte selbst übernehmen.");
+                    break;
+                }
+
+                updateStatus("Schritt " + step + "/6 · Lokale Bildanalyse …");
+                String raw = agent.analyze(task, frame, visibleText, step, completed);
+                JSONObject decision = parseDecision(raw);
+                if (decision == null) { updateStatus("KI-Antwort war kein gültiges Aktionsformat. Gestoppt."); break; }
+                String explanation = decision.optString("summary", "Nächsten Schritt geprüft.");
+                if (decision.optBoolean("done", false)) {
+                    updateStatus("Fertig: " + explanation);
+                    break;
+                }
+                JSONObject action = decision.optJSONObject("action");
+                if (action == null) { updateStatus("Keine sichere Aktion vorgeschlagen: " + explanation); break; }
+                double confidence = action.optDouble("confidence", 0);
+                if (confidence < 0.78) { updateStatus("Unsicherheit zu hoch – Agent pausiert: " + explanation); break; }
+
+                boolean success = executeSafeAction(service, action);
+                if (!success) { updateStatus("Aktion durch Sicherheitsprüfung blockiert oder nicht ausführbar."); break; }
+                completed++;
+                updateStatus("Aktion " + completed + " ausgeführt. Prüfe das neue Ergebnis …");
+                Thread.sleep(900);
+            }
+            if (completed >= 6 && !stopRequested) updateStatus("Sicherheitslimit erreicht: maximal 6 Aktionen pro Auftrag.");
+            else if (stopRequested) updateStatus("Agent manuell gestoppt.");
+        } catch (Exception e) {
+            updateStatus("Lokale KI konnte nicht starten: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+        } finally {
+            if (agent != null) { try { agent.close(); } catch (Exception ignored) {} agent = null; }
+            running = false;
+        }
+    }
+
+    private JSONObject parseDecision(String raw) {
+        try {
+            int first = raw.indexOf('{');
+            int last = raw.lastIndexOf('}');
+            if (first < 0 || last <= first) return null;
+            return new JSONObject(raw.substring(first, last + 1));
+        } catch (Exception e) { return null; }
+    }
+
+    private boolean executeSafeAction(ScreenActionService service, JSONObject action) throws Exception {
+        String type = action.optString("type", "").toLowerCase(Locale.ROOT);
+        if ("tap".equals(type)) {
+            return service.safeTap((float)action.getDouble("x"), (float)action.getDouble("y"));
+        }
+        if ("swipe".equals(type)) {
+            return service.safeSwipe((float)action.getDouble("x1"), (float)action.getDouble("y1"),
+                    (float)action.getDouble("x2"), (float)action.getDouble("y2"), action.optLong("duration", 350));
+        }
+        if ("type".equals(type)) return service.safeType(action.getString("text"));
+        return false;
+    }
+
+    private boolean isSensitiveContext(String text) {
+        String s = text == null ? "" : text.toLowerCase(Locale.ROOT);
+        String[] blocked = {"password", "passwort", "bank", "banking", "payment", "checkout", "kaufen",
+                "purchase", "bestellen", "überweisen", "transfer", "login", "anmelden", "security",
+                "sicherheit", "delete account", "konto löschen", "send", "senden", "publish",
+                "veröffentlichen", "post", "teilen", "share", "subscription", "abonnement"};
+        for (String word : blocked) if (s.contains(word)) return true;
+        return false;
+    }
+
+    private void requestStop() {
+        stopRequested = true;
+        updateStatus("Stopp angefordert …");
+    }
+
+    private void updateStatus(String message) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (status != null) status.setText(message);
+        });
+    }
+
+    @Override public void onDestroy() {
+        stopRequested = true;
+        if (bubble != null) wm.removeView(bubble);
+        if (panel != null) wm.removeView(panel);
+        worker.shutdownNow();
+        if (agent != null) { try { agent.close(); } catch (Exception ignored) {} }
+        super.onDestroy();
+    }
+
+    @Override public IBinder onBind(Intent intent) { return null; }
 }
