@@ -9,6 +9,8 @@ import android.util.DisplayMetrics;
 import android.view.WindowManager;
 import android.view.accessibility.*;
 import java.util.Locale;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 public class ScreenActionService extends AccessibilityService {
     public static volatile ScreenActionService instance;
@@ -37,7 +39,7 @@ public class ScreenActionService extends AccessibilityService {
     }
 
     private void walk(AccessibilityNodeInfo node, StringBuilder out, int depth) {
-        if (node == null || depth > 18 || out.length() > 7000) return;
+        if (node == null || depth > 18 || out.length() > 5000) return;
         CharSequence text = node.getText();
         CharSequence description = node.getContentDescription();
         if (text != null && text.length() > 0) out.append(text).append(" | ");
@@ -47,16 +49,41 @@ public class ScreenActionService extends AccessibilityService {
 
     public boolean safeTap(float x, float y) {
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return false;
         AccessibilityNodeInfo target = findClickableAt(root, x, y, 0);
-        if (target == null) return false;
-        String label = ((target.getText() == null ? "" : target.getText().toString()) + " " +
-                (target.getContentDescription() == null ? "" : target.getContentDescription().toString())).toLowerCase(Locale.ROOT);
-        if (label.trim().isEmpty() || isSensitiveLabel(label)) return false;
+        if (target == null || isBlockedNode(target)) return false;
         Path path = new Path();
         path.moveTo(x, y);
         return dispatchGesture(new GestureDescription.Builder()
-                .addStroke(new GestureDescription.StrokeDescription(path, 0, 90)).build(), null, null);
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 65)).build(), null, null);
+    }
+
+    /** Dispatches 2-4 simultaneous finger taps as one Android multi-stroke gesture. */
+    public boolean safeMultiTap(JSONArray points) {
+        if (points == null || points.length() < 2 || points.length() > 4) return false;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return false;
+        GestureDescription.Builder builder = new GestureDescription.Builder();
+        for (int i = 0; i < points.length(); i++) {
+            JSONObject point = points.optJSONObject(i);
+            if (point == null) return false;
+            float x = (float)point.optDouble("x", -1);
+            float y = (float)point.optDouble("y", -1);
+            AccessibilityNodeInfo target = findClickableAt(root, x, y, 0);
+            if (target == null || isBlockedNode(target)) return false;
+            Path path = new Path();
+            path.moveTo(x, y);
+            builder.addStroke(new GestureDescription.StrokeDescription(path, 0, 65));
+        }
+        return dispatchGesture(builder.build(), null, null);
+    }
+
+    private boolean isBlockedNode(AccessibilityNodeInfo node) {
+        if (node == null || !node.isEnabled()) return true;
+        if (node.isPassword()) return true;
+        String label = ((node.getText() == null ? "" : node.getText().toString()) + " " +
+                (node.getContentDescription() == null ? "" : node.getContentDescription().toString()) + " " +
+                (node.getHintText() == null ? "" : node.getHintText().toString())).toLowerCase(Locale.ROOT);
+        return label.trim().isEmpty() || isSensitiveLabel(label);
     }
 
     private AccessibilityNodeInfo findClickableAt(AccessibilityNodeInfo node, float x, float y, int depth) {
@@ -75,7 +102,7 @@ public class ScreenActionService extends AccessibilityService {
         String[] blocked = {"buy", "purchase", "checkout", "payment", "pay now", "kaufen", "bestellen",
                 "delete", "löschen", "remove account", "password", "passwort", "login", "anmelden",
                 "send", "senden", "publish", "veröffentlichen", "post", "share", "teilen", "transfer",
-                "überweisen", "subscribe", "abonnieren", "confirm purchase"};
+                "überweisen", "subscribe", "abonnieren", "confirm purchase", "security", "sicherheit"};
         for (String word : blocked) if (text.contains(word)) return true;
         return false;
     }
@@ -91,19 +118,17 @@ public class ScreenActionService extends AccessibilityService {
         Path path = new Path();
         path.moveTo(x1, y1);
         path.lineTo(x2, y2);
-        long duration = Math.max(180, Math.min(650, durationMs));
+        long duration = Math.max(100, Math.min(500, durationMs));
         return dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, duration)).build(), null, null);
     }
 
     public boolean safeType(String value) {
-        if (value == null || value.length() > 240) return false;
+        if (value == null || value.length() > 160) return false;
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return false;
         AccessibilityNodeInfo field = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-        if (field == null || field.isPassword()) return false;
-        CharSequence hint = field.getHintText();
-        if (hint != null && isSensitiveLabel(hint.toString().toLowerCase(Locale.ROOT))) return false;
+        if (field == null || field.isPassword() || isBlockedNode(field)) return false;
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value);
         return field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
