@@ -5,6 +5,9 @@ on:
     branches: ["main"]
 permissions:
   contents: read
+concurrency:
+  group: ai-assistent-android-build
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,7 +21,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.9"
+          gradle-version: "8.14.4"
       - name: Build debug APK
         run: gradle assembleDebug
       - name: Upload APK
