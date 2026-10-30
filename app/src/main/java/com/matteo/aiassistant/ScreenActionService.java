@@ -52,7 +52,7 @@ public class ScreenActionService extends AccessibilityService {
         if (target == null) return false;
         String label = ((target.getText() == null ? "" : target.getText().toString()) + " " +
                 (target.getContentDescription() == null ? "" : target.getContentDescription().toString())).toLowerCase(Locale.ROOT);
-        if (isSensitiveLabel(label)) return false;
+        if (label.trim().isEmpty() || isSensitiveLabel(label)) return false;
         Path path = new Path();
         path.moveTo(x, y);
         return dispatchGesture(new GestureDescription.Builder()
