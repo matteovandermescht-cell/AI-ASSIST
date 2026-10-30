@@ -8,11 +8,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.widget.*;
-import java.io.*;
 
 public class MainActivity extends Activity {
-    private static final int PICK_MODEL = 41;
-    private static final int CAPTURE_PERMISSION = 42;
     private int dp(int v) { return (int)(v * getResources().getDisplayMetrics().density); }
 
     private Button makeButton(String text) {
@@ -37,44 +34,34 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(0xFF10111A);
 
         TextView title = new TextView(this);
-        title.setText("AI ASSISTENT 2.0");
+        title.setText("AI ASSISTENT 3.0 · VISUAL");
         title.setTextColor(0xFFFFFFFF);
-        title.setTextSize(26);
+        title.setTextSize(25);
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Lokaler visueller Android-Agent · keine API-Schlüssel");
+        subtitle.setText("Rein visuelle lokale Android-KI · ohne Sprachmodell und API-Schlüssel");
         subtitle.setTextColor(0xFFAAAABD);
         subtitle.setPadding(0, dp(6), 0, dp(18));
         root.addView(subtitle);
 
-        File model = new File(getFilesDir(), "model.litertlm");
         TextView modelStatus = new TextView(this);
-        modelStatus.setText(model.exists() ? "Lokales Modell: bereit" : "Noch kein lokales Vision-Modell ausgewählt");
-        modelStatus.setTextColor(model.exists() ? 0xFF8FE0A0 : 0xFFFFC66D);
+        modelStatus.setText("Erkennung: ML Kit Objekterkennung + Texterkennung");
+        modelStatus.setTextColor(0xFF8FE0A0);
         root.addView(modelStatus);
 
-        Button choose = makeButton("1 · Lokales .litertlm-Modell auswählen");
-        root.addView(choose);
-        choose.setOnClickListener(v -> {
-            Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            pick.setType("*/*");
-            pick.addCategory(Intent.CATEGORY_OPENABLE);
-            startActivityForResult(pick, PICK_MODEL);
-        });
-
         TextView hint = new TextView(this);
-        hint.setText("Wähle ein multimodales LiteRT-LM-Modell mit Bild-/Vision-Unterstützung. Das Modell bleibt auf dem Gerät. Der Modell-Download ist nicht Teil der APK.");
+        hint.setText("Die Analyse nutzt ausschließlich aufgenommene Bildschirmbilder. Objekte werden mit Begrenzungsrahmen erkannt; sichtbarer Text wird per OCR gelesen. In dieser Version tippt der Agent nur auf ein ausdrücklich genanntes, im Bild erkanntes Textziel. Die erste Objekterkennung kann eine Internetverbindung benötigen, um ihr lokales Modell bereitzustellen.");
         hint.setTextColor(0xFF9999AA);
         hint.setTextSize(12);
         hint.setPadding(0, dp(8), 0, dp(10));
         root.addView(hint);
 
-        Button accessibility = makeButton("2 · Bedienungshilfe aktivieren");
+        Button accessibility = makeButton("1 · Bedienungshilfe aktivieren");
         root.addView(accessibility);
         accessibility.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
 
-        Button overlay = makeButton("3 · Overlay-Berechtigung");
+        Button overlay = makeButton("2 · Overlay-Berechtigung");
         root.addView(overlay);
         overlay.setOnClickListener(v -> {
             if (!Settings.canDrawOverlays(this)) {
@@ -82,7 +69,7 @@ public class MainActivity extends Activity {
             } else Toast.makeText(this, "Overlay ist bereits erlaubt", Toast.LENGTH_SHORT).show();
         });
 
-        Button start = makeButton("4 · Bildschirmfreigabe starten");
+        Button start = makeButton("3 · Bildschirmfreigabe starten");
         start.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF6750D8));
         root.addView(start);
         start.setOnClickListener(v -> beginCapture());
@@ -96,7 +83,7 @@ public class MainActivity extends Activity {
         });
 
         TextView safety = new TextView(this);
-        safety.setText("Sicherheitsgrenzen: maximal 6 Aktionen pro Auftrag, begrenzte Aktionen, Stopp-Schaltfläche und Sperre sensibler Bildschirmbereiche. Überwache den Agenten.");
+        safety.setText("Sicherheitsgrenzen: maximal 12 Schritte pro Auftrag, nur visuell erkannte Textziele, zusätzliche Klickprüfung, Stopp-Schaltfläche. Überwache den Agenten.");
         safety.setTextColor(0xFF9999AA);
         safety.setTextSize(12);
         safety.setPadding(0, dp(18), 0, 0);
@@ -108,35 +95,17 @@ public class MainActivity extends Activity {
     }
 
     private void beginCapture() {
-        if (!new File(getFilesDir(), "model.litertlm").exists()) {
-            Toast.makeText(this, "Bitte zuerst ein lokales Vision-Modell auswählen.", Toast.LENGTH_LONG).show();
-            return;
-        }
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Bitte zuerst die Overlay-Berechtigung erteilen.", Toast.LENGTH_LONG).show();
             return;
         }
         MediaProjectionManager manager = (MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
-        startActivityForResult(manager.createScreenCaptureIntent(), CAPTURE_PERMISSION);
+        startActivityForResult(manager.createScreenCaptureIntent(), 42);
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == PICK_MODEL && resultCode == RESULT_OK && data != null) {
-            Uri uri = data.getData();
-            try {
-                File destination = new File(getFilesDir(), "model.litertlm");
-                try (InputStream in = getContentResolver().openInputStream(uri);
-                     OutputStream out = new FileOutputStream(destination)) {
-                    byte[] buffer = new byte[1024 * 1024];
-                    int count;
-                    while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
-                }
-                Toast.makeText(this, "Modell lokal gespeichert: " + (destination.length() / (1024 * 1024)) + " MB", Toast.LENGTH_LONG).show();
-            } catch (Exception e) {
-                Toast.makeText(this, "Modell konnte nicht kopiert werden: " + e.getMessage(), Toast.LENGTH_LONG).show();
-            }
-        } else if (requestCode == CAPTURE_PERMISSION && resultCode == RESULT_OK && data != null) {
+        if (requestCode == 42 && resultCode == RESULT_OK && data != null) {
             Intent capture = new Intent(this, ScreenCaptureService.class);
             capture.putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode);
             capture.putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data);
