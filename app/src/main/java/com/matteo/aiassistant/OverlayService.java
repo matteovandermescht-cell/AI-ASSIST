@@ -133,6 +133,7 @@ public class OverlayService extends Service {
 
                 updateStatus("Schritt " + step + "/6 · Lokale Bildanalyse …");
                 String raw = agent.analyze(task, frame, visibleText, step, completed);
+                if (stopRequested) { updateStatus("Agent manuell gestoppt – keine weitere Aktion ausgeführt."); break; }
                 JSONObject decision = parseDecision(raw);
                 if (decision == null) { updateStatus("KI-Antwort war kein gültiges Aktionsformat. Gestoppt."); break; }
                 String explanation = decision.optString("summary", "Nächsten Schritt geprüft.");
