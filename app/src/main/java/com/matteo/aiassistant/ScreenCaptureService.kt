@@ -22,11 +22,13 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var reader: ImageReader? = null
+    private var lastSavedAt = 0L
     private val channelId = "ai_assistent_screen_capture"
 
     override fun onCreate() {
@@ -65,11 +67,18 @@ class ScreenCaptureService : Service() {
             val metrics = DisplayMetrics()
             @Suppress("DEPRECATION")
             (getSystemService(WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(metrics)
-            val width = metrics.widthPixels.coerceAtMost(1440)
+            val width = metrics.widthPixels.coerceAtMost(1280)
             val height = (metrics.heightPixels * (width.toFloat() / metrics.widthPixels)).toInt()
             reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
             reader?.setOnImageAvailableListener({ source ->
+                val now = System.currentTimeMillis()
+                if (now - lastSavedAt < 180) {
+                    val skipped = source.acquireLatestImage()
+                    skipped?.close()
+                    return@setOnImageAvailableListener
+                }
                 val image = source.acquireLatestImage() ?: return@setOnImageAvailableListener
+                lastSavedAt = now
                 try { saveImage(image) } catch (_: Exception) { } finally { image.close() }
             }, null)
             virtualDisplay = projection?.createVirtualDisplay(
@@ -93,14 +102,18 @@ class ScreenCaptureService : Service() {
         padded.copyPixelsFromBuffer(buffer)
         val cropped = Bitmap.createBitmap(padded, 0, 0, width, height)
         padded.recycle()
-        val file = File(cacheDir, "latest_screen.jpg")
-        FileOutputStream(file).use { cropped.compress(Bitmap.CompressFormat.JPEG, 78, it) }
+
+        val file = File(cacheDir, "screen_${System.nanoTime()}.jpg")
+        FileOutputStream(file).use { cropped.compress(Bitmap.CompressFormat.JPEG, 72, it) }
         cropped.recycle()
+
         synchronized(frameLock) {
             latestFramePath = file.absolutePath
+            frameVersion.incrementAndGet()
             pendingFrame?.countDown()
             pendingFrame = null
         }
+        cacheDir.listFiles()?.filter { it.name.startsWith("screen_") && System.currentTimeMillis() - it.lastModified() > 30000 }?.forEach { it.delete() }
     }
 
     private fun createNotificationChannel() {
@@ -129,6 +142,7 @@ class ScreenCaptureService : Service() {
         const val EXTRA_RESULT_CODE = "capture_result_code"
         const val EXTRA_RESULT_DATA = "capture_result_data"
         private val frameLock = Any()
+        private val frameVersion = AtomicLong(0)
         @Volatile private var latestFramePath: String? = null
         private var pendingFrame: CountDownLatch? = null
 
