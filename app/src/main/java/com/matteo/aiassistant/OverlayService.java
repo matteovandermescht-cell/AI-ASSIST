@@ -12,8 +12,6 @@ import android.view.WindowManager;
 import android.widget.*;
 import android.graphics.Color;
 import org.json.JSONObject;
-import org.json.JSONArray;
-import java.io.File;
 import java.util.Locale;
 import java.util.concurrent.*;
 
@@ -65,7 +63,7 @@ public class OverlayService extends Service {
         panel.setBackgroundColor(0xF01B1B29);
 
         TextView heading = new TextView(this);
-        heading.setText("AI ASSISTENT · LOCAL REALTIME");
+        heading.setText("AI ASSISTENT · VISUAL ONLY");
         heading.setTextColor(Color.WHITE);
         heading.setTextSize(15);
         panel.addView(heading);
@@ -73,13 +71,13 @@ public class OverlayService extends Service {
         taskInput = new EditText(this);
         taskInput.setTextColor(Color.WHITE);
         taskInput.setHintTextColor(0xFFAAAAAA);
-        taskInput.setHint("Beschreibe dein Ziel …");
+        taskInput.setHint("z. B. „Drücke Start“ oder „Tap Play“");
         panel.addView(taskInput, new LinearLayout.LayoutParams(-1, dp(58)));
 
         status = new TextView(this);
         status.setTextColor(0xFFE0DDF5);
         status.setTextSize(12);
-        status.setText("Offline · GPU mit CPU-Fallback · automatische sichere Aktionen.");
+        status.setText("Nur Bildschirmbild · lokale Objekterkennung + OCR · kein Sprachmodell.");
         panel.addView(status);
 
         Button start = makeButton("Agent starten");
@@ -104,58 +102,55 @@ public class OverlayService extends Service {
 
     private void startAgent(String task) {
         if (running) { updateStatus("Der Agent läuft bereits."); return; }
-        if (task == null || task.trim().isEmpty()) { updateStatus("Bitte zuerst ein Ziel eingeben."); return; }
-        File model = new File(getFilesDir(), "model.litertlm");
-        if (!model.exists()) { updateStatus("Lokales Vision-Modell fehlt. Importiere zuerst eine kompatible .litertlm-Datei."); return; }
+        if (task == null || task.trim().isEmpty()) { updateStatus("Bitte ein konkretes Ziel eingeben."); return; }
         if (ScreenCaptureService.awaitFrame(150) == null) {
             updateStatus("Keine Bildschirmfreigabe aktiv. Starte sie zuerst in der Haupt-App.");
             return;
         }
+        if (ScreenActionService.instance == null) {
+            updateStatus("Bedienungshilfe nicht aktiv. Agent kann nicht sicher tippen.");
+            return;
+        }
         running = true;
         stopRequested = false;
-        worker.execute(() -> runAgent(task.trim(), model.getAbsolutePath()));
+        worker.execute(() -> runAgent(task.trim()));
     }
 
-    private void runAgent(String task, String modelPath) {
+    private void runAgent(String task) {
         int completed = 0;
         try {
-            updateStatus("Initialisiere lokale KI (GPU, sonst CPU) …");
-            agent = new LocalVisionAgent(modelPath, new File(getCacheDir(), "litert-cache").getAbsolutePath());
+            updateStatus("Initialisiere lokale visuelle Erkennung …");
+            agent = new LocalVisionAgent(getApplicationContext());
             for (int step = 1; step <= 12 && !stopRequested; step++) {
                 String frame = ScreenCaptureService.awaitFrame(5000);
                 if (frame == null) { updateStatus("Kein aktuelles Bildschirmbild erhalten. Agent pausiert."); break; }
                 ScreenActionService service = ScreenActionService.instance;
                 if (service == null) { updateStatus("Bedienungshilfe nicht aktiv. Agent gestoppt."); break; }
-                String visibleText = service.readVisibleText();
-                if (isSensitiveContext(visibleText)) {
-                    updateStatus("Sicherheitsstopp: sensibler Bildschirm erkannt.");
-                    break;
-                }
 
-                updateStatus("Live-Analyse · Schritt " + step + "/12 …");
-                String raw = agent.analyze(task, frame, visibleText, step, completed);
+                updateStatus("Visuelle Analyse · Schritt " + step + "/12 …");
+                String raw = agent.analyze(task, frame, "", step, completed);
                 if (stopRequested) { updateStatus("Agent gestoppt – keine weitere Aktion ausgeführt."); break; }
                 JSONObject decision = parseDecision(raw);
-                if (decision == null) { updateStatus("Ungültige KI-Antwort. Agent sicher gestoppt."); break; }
-                String explanation = decision.optString("summary", "Aktion geprüft.");
+                if (decision == null) { updateStatus("Ungültige Analyseantwort. Agent sicher gestoppt."); break; }
+                String explanation = decision.optString("summary", "Bild geprüft.");
                 if (decision.optBoolean("done", false)) {
                     updateStatus("Fertig: " + explanation);
                     break;
                 }
                 JSONObject action = decision.optJSONObject("action");
-                if (action == null) { updateStatus("Keine sichere Aktion erkannt: " + explanation); break; }
+                if (action == null) { updateStatus(explanation); break; }
                 double confidence = action.optDouble("confidence", 0);
-                if (confidence < 0.78) { updateStatus("Unsicherheit zu hoch – Agent pausiert."); break; }
+                if (confidence < 0.78) { updateStatus("Ziel nicht sicher genug erkannt – Agent pausiert."); break; }
 
                 boolean success = executeSafeAction(service, action);
-                if (!success) { updateStatus("Aktion blockiert oder nicht ausführbar."); break; }
+                if (!success) { updateStatus("Aktion durch Sicherheitsprüfung blockiert oder nicht ausführbar."); break; }
                 completed++;
-                updateStatus("Aktion " + completed + " ausgeführt · prüfe direkt den neuen Bildschirm …");
+                updateStatus("Aktion " + completed + " ausgeführt · prüfe den neuen Bildschirm …");
             }
             if (completed >= 12 && !stopRequested) updateStatus("Sicherheitslimit erreicht: 12 Aktionen pro Auftrag.");
             else if (stopRequested) updateStatus("Agent manuell gestoppt.");
         } catch (Exception e) {
-            updateStatus("Lokale KI konnte nicht starten: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            updateStatus("Visuelle Erkennung fehlgeschlagen: " + e.getClass().getSimpleName() + ": " + e.getMessage());
         } finally {
             if (agent != null) { try { agent.close(); } catch (Exception ignored) {} agent = null; }
             running = false;
@@ -163,12 +158,8 @@ public class OverlayService extends Service {
     }
 
     private JSONObject parseDecision(String raw) {
-        try {
-            int first = raw.indexOf('{');
-            int last = raw.lastIndexOf('}');
-            if (first < 0 || last <= first) return null;
-            return new JSONObject(raw.substring(first, last + 1));
-        } catch (Exception e) { return null; }
+        try { return new JSONObject(raw); }
+        catch (Exception e) { return null; }
     }
 
     private boolean executeSafeAction(ScreenActionService service, JSONObject action) throws Exception {
@@ -176,25 +167,6 @@ public class OverlayService extends Service {
         if ("tap".equals(type)) {
             return service.safeTap((float)action.getDouble("x"), (float)action.getDouble("y"));
         }
-        if ("multitap".equals(type)) {
-            JSONArray points = action.optJSONArray("points");
-            return service.safeMultiTap(points);
-        }
-        if ("swipe".equals(type)) {
-            return service.safeSwipe((float)action.getDouble("x1"), (float)action.getDouble("y1"),
-                    (float)action.getDouble("x2"), (float)action.getDouble("y2"), action.optLong("duration", 250));
-        }
-        if ("type".equals(type)) return service.safeType(action.getString("text"));
-        return false;
-    }
-
-    private boolean isSensitiveContext(String text) {
-        String s = text == null ? "" : text.toLowerCase(Locale.ROOT);
-        String[] blocked = {"password", "passwort", "bank", "banking", "payment", "checkout", "kaufen",
-                "purchase", "bestellen", "überweisen", "transfer", "login", "anmelden", "security",
-                "sicherheit", "delete account", "konto löschen", "send", "senden", "publish",
-                "veröffentlichen", "post", "teilen", "share", "subscription", "abonnement"};
-        for (String word : blocked) if (s.contains(word)) return true;
         return false;
     }
 
