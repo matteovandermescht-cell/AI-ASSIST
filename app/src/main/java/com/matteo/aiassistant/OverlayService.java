@@ -12,6 +12,7 @@ import android.view.WindowManager;
 import android.widget.*;
 import android.graphics.Color;
 import org.json.JSONObject;
+import org.json.JSONArray;
 import java.io.File;
 import java.util.Locale;
 import java.util.concurrent.*;
@@ -64,7 +65,7 @@ public class OverlayService extends Service {
         panel.setBackgroundColor(0xF01B1B29);
 
         TextView heading = new TextView(this);
-        heading.setText("AI ASSISTENT · LOCAL AGENT");
+        heading.setText("AI ASSISTENT · LOCAL REALTIME");
         heading.setTextColor(Color.WHITE);
         heading.setTextSize(15);
         panel.addView(heading);
@@ -78,7 +79,7 @@ public class OverlayService extends Service {
         status = new TextView(this);
         status.setTextColor(0xFFE0DDF5);
         status.setTextSize(12);
-        status.setText("Offline-Modus. Bis zu 6 kontrollierte Schritte pro Auftrag.");
+        status.setText("Offline · GPU mit CPU-Fallback · automatische sichere Aktionen.");
         panel.addView(status);
 
         Button start = makeButton("Agent starten");
@@ -104,12 +105,12 @@ public class OverlayService extends Service {
     private void startAgent(String task) {
         if (running) { updateStatus("Der Agent läuft bereits."); return; }
         if (task == null || task.trim().isEmpty()) { updateStatus("Bitte zuerst ein Ziel eingeben."); return; }
+        File model = new File(getFilesDir(), "model.litertlm");
+        if (!model.exists()) { updateStatus("Lokales Vision-Modell fehlt. Importiere zuerst eine kompatible .litertlm-Datei."); return; }
         if (ScreenCaptureService.awaitFrame(150) == null) {
             updateStatus("Keine Bildschirmfreigabe aktiv. Starte sie zuerst in der Haupt-App.");
             return;
         }
-        File model = new File(getFilesDir(), "model.litertlm");
-        if (!model.exists()) { updateStatus("Lokales Modell fehlt. Wähle zuerst eine .litertlm-Datei aus."); return; }
         running = true;
         stopRequested = false;
         worker.execute(() -> runAgent(task.trim(), model.getAbsolutePath()));
@@ -118,41 +119,40 @@ public class OverlayService extends Service {
     private void runAgent(String task, String modelPath) {
         int completed = 0;
         try {
-            updateStatus("Lade lokales KI-Modell …");
-            agent = new LocalVisionAgent(modelPath);
-            for (int step = 1; step <= 6 && !stopRequested; step++) {
-                String frame = ScreenCaptureService.awaitFrame(6000);
+            updateStatus("Initialisiere lokale KI (GPU, sonst CPU) …");
+            agent = new LocalVisionAgent(modelPath, new File(getCacheDir(), "litert-cache").getAbsolutePath());
+            for (int step = 1; step <= 12 && !stopRequested; step++) {
+                String frame = ScreenCaptureService.awaitFrame(5000);
                 if (frame == null) { updateStatus("Kein aktuelles Bildschirmbild erhalten. Agent pausiert."); break; }
                 ScreenActionService service = ScreenActionService.instance;
                 if (service == null) { updateStatus("Bedienungshilfe nicht aktiv. Agent gestoppt."); break; }
                 String visibleText = service.readVisibleText();
                 if (isSensitiveContext(visibleText)) {
-                    updateStatus("Sicherheitsstopp: sensibler Bildschirm erkannt. Bitte selbst übernehmen.");
+                    updateStatus("Sicherheitsstopp: sensibler Bildschirm erkannt.");
                     break;
                 }
 
-                updateStatus("Schritt " + step + "/6 · Lokale Bildanalyse …");
+                updateStatus("Live-Analyse · Schritt " + step + "/12 …");
                 String raw = agent.analyze(task, frame, visibleText, step, completed);
-                if (stopRequested) { updateStatus("Agent manuell gestoppt – keine weitere Aktion ausgeführt."); break; }
+                if (stopRequested) { updateStatus("Agent gestoppt – keine weitere Aktion ausgeführt."); break; }
                 JSONObject decision = parseDecision(raw);
-                if (decision == null) { updateStatus("KI-Antwort war kein gültiges Aktionsformat. Gestoppt."); break; }
-                String explanation = decision.optString("summary", "Nächsten Schritt geprüft.");
+                if (decision == null) { updateStatus("Ungültige KI-Antwort. Agent sicher gestoppt."); break; }
+                String explanation = decision.optString("summary", "Aktion geprüft.");
                 if (decision.optBoolean("done", false)) {
                     updateStatus("Fertig: " + explanation);
                     break;
                 }
                 JSONObject action = decision.optJSONObject("action");
-                if (action == null) { updateStatus("Keine sichere Aktion vorgeschlagen: " + explanation); break; }
+                if (action == null) { updateStatus("Keine sichere Aktion erkannt: " + explanation); break; }
                 double confidence = action.optDouble("confidence", 0);
-                if (confidence < 0.78) { updateStatus("Unsicherheit zu hoch – Agent pausiert: " + explanation); break; }
+                if (confidence < 0.78) { updateStatus("Unsicherheit zu hoch – Agent pausiert."); break; }
 
                 boolean success = executeSafeAction(service, action);
-                if (!success) { updateStatus("Aktion durch Sicherheitsprüfung blockiert oder nicht ausführbar."); break; }
+                if (!success) { updateStatus("Aktion blockiert oder nicht ausführbar."); break; }
                 completed++;
-                updateStatus("Aktion " + completed + " ausgeführt. Prüfe das neue Ergebnis …");
-                Thread.sleep(900);
+                updateStatus("Aktion " + completed + " ausgeführt · prüfe direkt den neuen Bildschirm …");
             }
-            if (completed >= 6 && !stopRequested) updateStatus("Sicherheitslimit erreicht: maximal 6 Aktionen pro Auftrag.");
+            if (completed >= 12 && !stopRequested) updateStatus("Sicherheitslimit erreicht: 12 Aktionen pro Auftrag.");
             else if (stopRequested) updateStatus("Agent manuell gestoppt.");
         } catch (Exception e) {
             updateStatus("Lokale KI konnte nicht starten: " + e.getClass().getSimpleName() + ": " + e.getMessage());
@@ -176,9 +176,13 @@ public class OverlayService extends Service {
         if ("tap".equals(type)) {
             return service.safeTap((float)action.getDouble("x"), (float)action.getDouble("y"));
         }
+        if ("multitap".equals(type)) {
+            JSONArray points = action.optJSONArray("points");
+            return service.safeMultiTap(points);
+        }
         if ("swipe".equals(type)) {
             return service.safeSwipe((float)action.getDouble("x1"), (float)action.getDouble("y1"),
-                    (float)action.getDouble("x2"), (float)action.getDouble("y2"), action.optLong("duration", 350));
+                    (float)action.getDouble("x2"), (float)action.getDouble("y2"), action.optLong("duration", 250));
         }
         if ("type".equals(type)) return service.safeType(action.getString("text"));
         return false;
