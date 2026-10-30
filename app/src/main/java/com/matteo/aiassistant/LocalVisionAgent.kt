@@ -32,73 +32,39 @@ class LocalVisionAgent(context: Context) : AutoCloseable {
             ?: return decision(false, "Bild konnte nicht gelesen werden.", null)
         try {
             val image = InputImage.fromBitmap(bitmap, 0)
-            // Start both local pipelines before waiting so OCR and object detection overlap.
             val objectTask = detector.process(image)
             val textTask = recognizer.process(image)
             val objects = Tasks.await(objectTask, 3500, TimeUnit.MILLISECONDS)
             val text = Tasks.await(textTask, 3500, TimeUnit.MILLISECONDS)
-            val visibleLines = text.textBlocks.flatMap { block ->
+
+            val lines = text.textBlocks.flatMap { block ->
                 block.lines.mapNotNull { line ->
                     val bounds = line.boundingBox
                     if (bounds == null || line.text.isBlank()) null
-                    else VisibleLine(line.text.trim(), Rect(bounds))
+                    else line.text.trim()
                 }
             }
-            val labels = objects.flatMap { item -> item.labels.map { it.text.lowercase(Locale.ROOT) } }.distinct()
-            val visibleSummary = buildString {
-                append("Bild geprüft: ").append(objects.size).append(" Objekte, ")
-                    .append(visibleLines.size).append(" Textbereiche.")
-                if (labels.isNotEmpty()) append(" Klassen: ").append(labels.joinToString(", "))
+            val labels = objects.flatMap { item ->
+                item.labels.map { it.text.lowercase(Locale.ROOT) }
+            }.distinct()
+
+            val summary = buildString {
+                append("Bildanalyse abgeschlossen. ")
+                append(objects.size).append(" Objekte erkannt; ")
+                append(lines.size).append(" Textzeilen gelesen.")
+                if (labels.isNotEmpty()) append(" Objekte: ").append(labels.take(8).joinToString(", "))
+                if (lines.isNotEmpty()) append(" Sichtbarer Text: ")
+                    .append(lines.take(8).joinToString(" | ").take(500))
+                if (containsSensitiveText(lines.joinToString(" "))) {
+                    append(" Hinweis: möglicherweise sensibler Text sichtbar; Inhalte werden nicht weiter ausgewertet.")
+                }
             }
-
-            if (containsSensitiveText(visibleLines.joinToString(" ") { it.text })) {
-                return decision(false, "Sicherheitsstopp: sensibler Bildschirmtext erkannt. $visibleSummary", null)
-            }
-
-            val target = extractExplicitTapTarget(goal)
-                ?: return decision(false, "Kein eindeutiges Textziel im Auftrag. $visibleSummary", null)
-            val match = visibleLines.asSequence()
-                .map { line -> line to textMatchScore(target, line.text) }
-                .filter { it.second >= 0.78 }
-                .maxByOrNull { it.second }
-                ?: return decision(false, "„$target“ im aktuellen Bild nicht eindeutig erkannt; keine Aktion. $visibleSummary", null)
-
-            val screen = realScreenSize()
-            val x = ((match.first.bounds.left + match.first.bounds.right) / 2f *
-                screen.widthPixels.toFloat() / bitmap.width.toFloat()).toInt()
-            val y = ((match.first.bounds.top + match.first.bounds.bottom) / 2f *
-                screen.heightPixels.toFloat() / bitmap.height.toFloat()).toInt()
-            val action = JSONObject().put("type", "tap").put("x", x).put("y", y)
-                .put("confidence", match.second.coerceIn(0.78, 0.98))
-            return decision(false, "Sichtbares Ziel „$target“ erkannt. $visibleSummary", action)
+            return decision(false, summary, null)
         } catch (error: Exception) {
             return decision(false, "Bildanalyse fehlgeschlagen: ${error.javaClass.simpleName}.", null)
         } finally {
             bitmap.recycle()
         }
-    }
-
-    private fun extractExplicitTapTarget(goal: String): String? {
-        val patterns = listOf(
-            Regex("""(?i)(?:tap|click|press)\s+(?:on\s+)?(?:the\s+)?(.+)$"""),
-            Regex("""(?i)(?:drück(?:e)?|klick(?:e)?|tippe(?:\s+auf)?|wähle)\s+(?:den\s+|die\s+|das\s+)?(.+)$""")
-        )
-        val raw = patterns.firstNotNullOfOrNull { it.find(goal)?.groupValues?.getOrNull(1) } ?: return null
-        val cleaned = raw.replace(Regex("""(?i)\b(button|knopf|taste|element|bitte|an)\b"""), " ")
-            .replace(Regex("""[.!?,;:]+$"""), "").trim()
-        return cleaned.takeIf { it.length in 1..48 && it.any(Char::isLetterOrDigit) }
-    }
-
-    private fun textMatchScore(target: String, visible: String): Double {
-        val wanted = normalize(target)
-        val seen = normalize(visible)
-        if (wanted.isBlank() || seen.isBlank()) return 0.0
-        if (seen == wanted) return 0.99
-        if (seen.contains(wanted)) return 0.95
-        if (wanted.contains(seen) && seen.length >= 3) return 0.86
-        val words = wanted.split(' ').filter { it.length >= 2 }.toSet()
-        if (words.isEmpty()) return 0.0
-        return words.intersect(seen.split(' ').toSet()).size.toDouble() / words.size
     }
 
     private fun normalize(value: String): String =
