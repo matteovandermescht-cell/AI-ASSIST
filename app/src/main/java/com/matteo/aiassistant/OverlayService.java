@@ -32,7 +32,7 @@ public class OverlayService extends Service {
         panel=new LinearLayout(this);panel.setOrientation(1);panel.setPadding(dp(12),dp(10),dp(12),dp(10));panel.setBackgroundColor(0xF01B1B29);
         TextView h=new TextView(this);h.setText("AI ASSISTENT · ZIEL-APP-MODUS");h.setTextColor(Color.WHITE);h.setTextSize(15);panel.addView(h);
         taskInput=new EditText(this);taskInput.setTextColor(Color.WHITE);taskInput.setHintTextColor(0xFFAAAAAA);taskInput.setHint("Auftrag für die ausgewählte App");panel.addView(taskInput,new LinearLayout.LayoutParams(-1,dp(58)));
-        status=new TextView(this);status.setTextColor(0xFFE0DDF5);status.setTextSize(12);status.setText("Automatische Aktionen nur innerhalb deiner ausgewählten App.");panel.addView(status);
+        status=new TextView(this);status.setTextColor(0xFFE0DDF5);status.setTextSize(12);status.setText("Nur Bildschirmanalyse und Feedback. Es werden keine Aktionen ausgeführt.");panel.addView(status);
         Button start=btn("Agent starten");panel.addView(start);start.setOnClickListener(v->startAgent(taskInput.getText().toString()));
         Button stop=btn("STOP · sofort anhalten");stop.setTextColor(0xFFFF7777);panel.addView(stop);stop.setOnClickListener(v->requestStop());
         Button close=btn("Overlay schließen");panel.addView(close);close.setOnClickListener(v->stopSelf());
@@ -66,13 +66,11 @@ public class OverlayService extends Service {
                 JSONObject d;try{d=new JSONObject(raw);}catch(Exception e){updateStatus("Ungültige Analyseantwort.");break;}
                 String summary=d.optString("summary","Bild geprüft.");
                 if(d.optBoolean("done",false)){updateStatus("Fertig: "+summary);break;}
-                JSONObject a=d.optJSONObject("action");if(a==null){updateStatus(summary);break;}
-                if(a.optDouble("confidence",0)<0.78){updateStatus("Ziel nicht sicher erkannt. Agent pausiert.");break;}
-                if(!s.isTargetAppActive()||!"tap".equals(a.optString("type","").toLowerCase(Locale.ROOT))||
-                    !s.safeTap((float)a.optDouble("x",-1),(float)a.optDouble("y",-1))){updateStatus("Aktion blockiert oder nicht ausführbar.");break;}
-                completed++;updateStatus("Aktion "+completed+" ausgeführt. Prüfe nächsten Bildschirm …");
+                // Feedback-only mode: report the visual analysis and never perform screen actions.
+                completed++;
+                updateStatus("Bildschirm-Feedback "+completed+"/12: "+summary);
             }
-            if(completed>=12&&!stopRequested)updateStatus("Limit von 12 Aktionen erreicht.");
+            if(completed>=12&&!stopRequested)updateStatus("12 Bildanalysen abgeschlossen.");
             if(stopRequested)updateStatus("Agent gestoppt.");
         }catch(Exception e){updateStatus("Analysefehler: "+e.getClass().getSimpleName());}
         finally{if(agent!=null){try{agent.close();}catch(Exception ignored){}agent=null;}running=false;}
