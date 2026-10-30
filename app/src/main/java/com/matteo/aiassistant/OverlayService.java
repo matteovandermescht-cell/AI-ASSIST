@@ -103,8 +103,8 @@ public class OverlayService extends Service {
     private void startAgent(String task) {
         if (running) { updateStatus("Der Agent läuft bereits."); return; }
         if (task == null || task.trim().isEmpty()) { updateStatus("Bitte ein konkretes Ziel eingeben."); return; }
-        if (ScreenCaptureService.awaitFrame(150) == null) {
-            updateStatus("Keine Bildschirmfreigabe aktiv. Starte sie zuerst in der Haupt-App.");
+        if (ScreenCaptureService.latestFramePath() == null) {
+            updateStatus("Kein aktuelles Bildschirmbild. Bildschirmfreigabe in der Haupt-App starten.");
             return;
         }
         if (ScreenActionService.instance == null) {
@@ -121,9 +121,11 @@ public class OverlayService extends Service {
         try {
             updateStatus("Initialisiere lokale visuelle Erkennung …");
             agent = new LocalVisionAgent(getApplicationContext());
+            long lastFrameVersion = ScreenCaptureService.currentFrameVersion();
             for (int step = 1; step <= 12 && !stopRequested; step++) {
-                String frame = ScreenCaptureService.awaitFrame(5000);
-                if (frame == null) { updateStatus("Kein aktuelles Bildschirmbild erhalten. Agent pausiert."); break; }
+                String frame = ScreenCaptureService.awaitNextFramePath(lastFrameVersion, 4000);
+                if (frame == null) { updateStatus("Kein neues Bildschirmbild erhalten. Agent pausiert."); break; }
+                lastFrameVersion = ScreenCaptureService.currentFrameVersion();
                 ScreenActionService service = ScreenActionService.instance;
                 if (service == null) { updateStatus("Bedienungshilfe nicht aktiv. Agent gestoppt."); break; }
 
