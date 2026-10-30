@@ -11,29 +11,37 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import java.io.File
 import java.io.FileOutputStream
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * Captures frames on a dedicated HandlerThread. The UI thread never waits for capture
+ * or performs bitmap conversion/JPEG compression.
+ */
 class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var reader: ImageReader? = null
-    private var lastSavedAt = 0L
+    private var captureThread: HandlerThread? = null
+    private var captureHandler: Handler? = null
     private val channelId = "ai_assistent_screen_capture"
+    @Volatile private var lastSavedAt = 0L
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        captureThread = HandlerThread("AI-ScreenCapture").also { it.start() }
+        captureHandler = Handler(captureThread!!.looper)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -62,7 +70,7 @@ class ScreenCaptureService : Service() {
             projection = manager.getMediaProjection(resultCode, data)
             projection?.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() { stopSelf() }
-            }, null)
+            }, captureHandler)
 
             val metrics = DisplayMetrics()
             @Suppress("DEPRECATION")
@@ -72,24 +80,24 @@ class ScreenCaptureService : Service() {
             reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
             reader?.setOnImageAvailableListener({ source ->
                 val now = System.currentTimeMillis()
-                if (now - lastSavedAt < 180) {
-                    val skipped = source.acquireLatestImage()
-                    skipped?.close()
+                if (now - lastSavedAt < FRAME_INTERVAL_MS) {
+                    source.acquireLatestImage()?.close()
                     return@setOnImageAvailableListener
                 }
                 val image = source.acquireLatestImage() ?: return@setOnImageAvailableListener
                 lastSavedAt = now
                 try { saveImage(image) } catch (_: Exception) { } finally { image.close() }
-            }, null)
+            }, captureHandler)
+
             virtualDisplay = projection?.createVirtualDisplay(
                 "AI-ASSISTENT-Capture", width, height, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader?.surface, null, null
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader?.surface, null, captureHandler
             )
         } catch (_: Exception) { stopSelf() }
         return START_NOT_STICKY
     }
 
-    private fun saveImage(image: android.media.Image) {
+    private fun saveImage(image: Image) {
         val plane = image.planes[0]
         val buffer = plane.buffer
         val pixelStride = plane.pixelStride
@@ -104,16 +112,18 @@ class ScreenCaptureService : Service() {
         padded.recycle()
 
         val file = File(cacheDir, "screen_${System.nanoTime()}.jpg")
-        FileOutputStream(file).use { cropped.compress(Bitmap.CompressFormat.JPEG, 72, it) }
+        FileOutputStream(file).use { cropped.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
         cropped.recycle()
 
         synchronized(frameLock) {
             latestFramePath = file.absolutePath
-            frameVersion.incrementAndGet()
-            pendingFrame?.countDown()
-            pendingFrame = null
+            frameVersion++
+            frameTimestamp = System.currentTimeMillis()
+            frameLock.notifyAll()
         }
-        cacheDir.listFiles()?.filter { it.name.startsWith("screen_") && System.currentTimeMillis() - it.lastModified() > 30000 }?.forEach { it.delete() }
+        cacheDir.listFiles()?.filter {
+            it.name.startsWith("screen_") && System.currentTimeMillis() - it.lastModified() > 30000
+        }?.forEach { it.delete() }
     }
 
     private fun createNotificationChannel() {
@@ -129,10 +139,13 @@ class ScreenCaptureService : Service() {
         projection?.stop()
         projection = null
         synchronized(frameLock) {
-            pendingFrame?.countDown()
-            pendingFrame = null
             latestFramePath = null
+            frameTimestamp = 0L
+            frameLock.notifyAll()
         }
+        captureThread?.quitSafely()
+        captureThread = null
+        captureHandler = null
         super.onDestroy()
     }
 
@@ -141,16 +154,34 @@ class ScreenCaptureService : Service() {
     companion object {
         const val EXTRA_RESULT_CODE = "capture_result_code"
         const val EXTRA_RESULT_DATA = "capture_result_data"
-        private val frameLock = Any()
-        private val frameVersion = AtomicLong(0)
+        private const val FRAME_INTERVAL_MS = 120L
+        private const val JPEG_QUALITY = 78
+        private val frameLock = Object()
+        @Volatile private var frameVersion = 0L
+        @Volatile private var frameTimestamp = 0L
         @Volatile private var latestFramePath: String? = null
-        private var pendingFrame: CountDownLatch? = null
 
-        @JvmStatic fun awaitFrame(timeoutMs: Long): String? {
-            val latch = CountDownLatch(1)
-            synchronized(frameLock) { pendingFrame = latch }
-            if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) return null
-            return synchronized(frameLock) { latestFramePath }
+        @JvmStatic fun latestFramePath(): String? = synchronized(frameLock) {
+            val path = latestFramePath
+            if (path != null && System.currentTimeMillis() - frameTimestamp <= 2000L) path else null
+        }
+
+        @JvmStatic fun currentFrameVersion(): Long = frameVersion
+
+        @JvmStatic fun awaitNextFramePath(afterVersion: Long, timeoutMs: Long): String? {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            synchronized(frameLock) {
+                while (frameVersion <= afterVersion && latestFramePath != null || frameVersion <= afterVersion && frameTimestamp == 0L) {
+                    val remaining = deadline - System.currentTimeMillis()
+                    if (remaining <= 0L) return null
+                    try { frameLock.wait(remaining) } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return null
+                    }
+                }
+                val path = latestFramePath
+                return if (path != null && System.currentTimeMillis() - frameTimestamp <= 2000L) path else null
+            }
         }
     }
 }
