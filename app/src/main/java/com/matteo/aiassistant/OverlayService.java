@@ -47,13 +47,21 @@ public class OverlayService extends Service {
  JSONObject parsed=new JSONObject(raw);pending=parsed.optJSONObject("action");String explanation=parsed.optString("explanation","Keine Erklärung erhalten.");
  post(()->result.setText(explanation+(pending==null?"\nKeine ausführbare Aktion vorgeschlagen.":"\nAktion bereit – bitte prüfen und bestätigen.")));c.disconnect();
  }catch(Exception e){post(()->result.setText("KI-Fehler: "+e.getMessage()));}});}
- private void execute(){if(pending==null){result.setText("Keine bestätigbare Aktion vorhanden.");return;}ScreenActionService s=ScreenActionService.instance;if(s==null){result.setText("Bedienungshilfe ist nicht aktiv.");return;}
- try{String t=pending.getString("type");boolean ok=false;
- if("tap".equals(t))ok=s.tap((float)pending.getDouble("x"),(float)pending.getDouble("y"));
- else if("swipe".equals(t))ok=s.swipe((float)pending.getDouble("x1"),(float)pending.getDouble("y1"),(float)pending.getDouble("x2"),(float)pending.getDouble("y2"),pending.optLong("duration",350));
- else if("type".equals(t))ok=s.setFocusedText(pending.getString("text"));
- result.setText(ok?"Aktion an Android übergeben.":"Aktion konnte nicht ausgeführt werden.");pending=null;
- }catch(Exception e){result.setText("Ungültige Aktion: "+e.getMessage());}}
+ private void execute(){
+  if(pending==null){result.setText("Keine bestätigbare Aktion vorhanden.");return;}
+  final JSONObject action=pending;pending=null;
+  if(panel!=null){wm.removeView(panel);panel=null;}
+  new android.os.Handler(getMainLooper()).postDelayed(()->{
+   ScreenActionService s=ScreenActionService.instance;
+   if(s==null){Toast.makeText(this,"Bedienungshilfe ist nicht aktiv.",Toast.LENGTH_LONG).show();return;}
+   try{String t=action.getString("type");boolean ok=false;
+    if("tap".equals(t))ok=s.tap((float)action.getDouble("x"),(float)action.getDouble("y"));
+    else if("swipe".equals(t))ok=s.swipe((float)action.getDouble("x1"),(float)action.getDouble("y1"),(float)action.getDouble("x2"),(float)action.getDouble("y2"),action.optLong("duration",350));
+    else if("type".equals(t))ok=s.setFocusedText(action.getString("text"));
+    Toast.makeText(this,ok?"Aktion an Android übergeben.":"Aktion konnte nicht ausgeführt werden.",Toast.LENGTH_LONG).show();
+   }catch(Exception e){Toast.makeText(this,"Ungültige Aktion: "+e.getMessage(),Toast.LENGTH_LONG).show();}
+  },350);
+ }
  private void post(Runnable r){new android.os.Handler(getMainLooper()).post(r);}
  @Override public void onDestroy(){if(bubble!=null)wm.removeView(bubble);if(panel!=null)wm.removeView(panel);worker.shutdownNow();super.onDestroy();}
  @Override public IBinder onBind(Intent i){return null;}
